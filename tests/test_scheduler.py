@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from croniter import croniter
 
-from src.scheduler import _check_and_fire, _update_last_run, _is_due
+from src.scheduler import _check_and_fire, _update_last_run, _next_fire_time
 
 
 @pytest.fixture
@@ -18,27 +18,52 @@ def schedule_file(tmp_path, agent_config):
     return sf
 
 
-class TestIsDue:
+class TestNextFireTime:
     def test_never_run_task_is_due(self):
         task = {"cron": "* * * * *", "last_run": 0}
-        assert _is_due(task, time.time()) is True
+        assert _next_fire_time(task, time.time()) is not None
 
     def test_recently_run_task_not_due(self):
         task = {"cron": "0 9 * * *", "last_run": int(time.time())}
-        assert _is_due(task, time.time()) is False
+        assert _next_fire_time(task, time.time()) is None
 
     def test_last_run_in_future_not_due(self):
         task = {"cron": "* * * * *", "last_run": int(time.time()) + 3600}
-        assert _is_due(task, time.time()) is False
+        assert _next_fire_time(task, time.time()) is None
 
     def test_invalid_cron_not_due(self):
         task = {"cron": "not valid", "last_run": 0}
-        assert _is_due(task, time.time()) is False
+        assert _next_fire_time(task, time.time()) is None
 
     def test_hourly_task_due_after_one_hour(self):
         now = time.time()
         task = {"cron": "0 * * * *", "last_run": int(now) - 3601}
-        assert _is_due(task, now) is True
+        assert _next_fire_time(task, now) is not None
+
+    def test_returns_actual_fire_time(self):
+        now = time.time()
+        task = {"cron": "0 * * * *", "last_run": int(now) - 3601}
+        fire_time = _next_fire_time(task, now)
+        assert fire_time is not None
+        assert fire_time <= now
+
+    def test_no_double_fire_when_last_run_before_cron_match(self):
+        """Regression: if last_run is set to a time before the cron match,
+        firing once and setting last_run=max(now, fire_time) should prevent
+        the same match from triggering again."""
+        # Simulate: cron matches at :00 of some hour, last_run is 30s before that
+        now = time.time()
+        # Find the most recent top-of-hour
+        cron_match = int(now) - (int(now) % 3600)
+        # last_run is 30s before the cron match (simulates premature first fire)
+        task = {"cron": "0 * * * *", "last_run": cron_match - 30}
+        fire_time = _next_fire_time(task, now)
+        assert fire_time is not None  # first fire is due
+
+        # After firing, last_run is set to max(now, fire_time)
+        task["last_run"] = max(int(now), int(fire_time))
+        # The same cron match should NOT trigger again
+        assert _next_fire_time(task, now) is None
 
 
 class TestUpdateLastRun:

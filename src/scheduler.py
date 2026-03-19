@@ -56,17 +56,17 @@ def _update_last_run(config, task_id: str, timestamp: int) -> None:
         raise
 
 
-def _is_due(task: dict, now: float) -> bool:
-    """Check if a task is due: was there a fire time between last_run and now?"""
+def _next_fire_time(task: dict, now: float) -> float | None:
+    """Return the fire time if task is due, else None."""
     last_run = task.get("last_run", 0)
     if last_run >= now:
-        return False
+        return None
     try:
         cron = croniter(task["cron"], last_run)
         next_fire = cron.get_next(float)
-        return next_fire <= now
+        return next_fire if next_fire <= now else None
     except (ValueError, KeyError):
-        return False
+        return None
 
 
 async def _run_task(agent, task_id: str, session_id: str, prompt: str) -> None:
@@ -91,7 +91,8 @@ async def _check_and_fire(agent) -> list[str]:
     for task in tasks:
         if not task.get("enabled", True):
             continue
-        if not _is_due(task, now):
+        fire_time = _next_fire_time(task, now)
+        if fire_time is None:
             continue
 
         task_id = task["id"]
@@ -103,10 +104,10 @@ async def _check_and_fire(agent) -> list[str]:
             if not skill_content.startswith("Skill not found"):
                 prompt = skill_content + "\n\n" + prompt
 
-        timestamp = int(now)
+        # Advance last_run past the matched fire time to prevent double-fires
+        timestamp = max(int(now), int(fire_time))
         session_id = f"sched:{task_id}:{timestamp}"
 
-        # Update last_run before firing to prevent double-fires
         _update_last_run(agent.config, task_id, timestamp)
 
         logger.info("Firing scheduled task: %s (session %s)", task_id, session_id)

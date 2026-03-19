@@ -4,6 +4,7 @@
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 from croniter import croniter
@@ -97,7 +98,7 @@ def _add(args: dict, config: AgentConfig) -> str:
         "prompt": prompt,
         "skill": args.get("skill"),
         "enabled": True,
-        "last_run": 0,
+        "last_run": int(time.time()),
     })
     _save(config, tasks)
     return f"Task '{task_id}' added — scheduled at `{cron}`."
