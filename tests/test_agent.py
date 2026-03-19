@@ -6,6 +6,7 @@ import pytest
 
 from src.agent.agent import Agent
 from src.llm import LLMResponse
+from src.skills import build_skill_manifest
 
 
 @pytest.fixture
@@ -282,7 +283,7 @@ class TestSystemTaskMode:
 
 class TestAgentInit:
     def test_loads_identity(self, agent):
-        assert "test assistant" in agent.static_prompt.lower()
+        assert "test assistant" in agent._identity.lower()
 
     def test_missing_identity_raises(self, tmp_path, tmp_skills):
         from src.config import AgentConfig
@@ -292,3 +293,46 @@ class TestAgentInit:
         )
         with pytest.raises(FileNotFoundError):
             Agent(config)
+
+
+class TestRuntimeSkillDetection:
+    async def test_new_session_picks_up_new_skills(self, agent_config):
+        agent = Agent(agent_config)
+        mock_response = LLMResponse(text="ok", tool_calls=None)
+
+        with patch("src.agent.agent.call_llm", new_callable=AsyncMock, return_value=mock_response) as mock_llm:
+            await agent.handle("hello", "s1")
+
+        # Add a new skill after first session
+        skill_dir = agent_config.skills_dir / "new_skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: new_skill\ndescription: A dynamically added skill\n---\n"
+        )
+
+        with patch("src.agent.agent.call_llm", new_callable=AsyncMock, return_value=mock_response) as mock_llm:
+            await agent.handle("hello", "s2")
+
+        system_prompt = mock_llm.call_args[0][1][0]["content"]
+        assert "new_skill" in system_prompt
+
+    async def test_same_session_does_not_rescan(self, agent_config):
+        agent = Agent(agent_config)
+        mock_response = LLMResponse(text="ok", tool_calls=None)
+
+        with patch("src.agent.agent.call_llm", new_callable=AsyncMock, return_value=mock_response), \
+             patch("src.agent.agent.build_skill_manifest", wraps=build_skill_manifest) as mock_manifest:
+            await agent.handle("msg1", "s1")
+            mock_manifest.reset_mock()
+            await agent.handle("msg2", "s1")
+
+        mock_manifest.assert_not_called()
+
+    async def test_empty_skills_dir_after_refresh(self, agent_config):
+        agent = Agent(agent_config)
+        mock_response = LLMResponse(text="ok", tool_calls=None)
+
+        with patch("src.agent.agent.call_llm", new_callable=AsyncMock, return_value=mock_response):
+            result = await agent.handle("hello", "s1")
+
+        assert result == "ok"

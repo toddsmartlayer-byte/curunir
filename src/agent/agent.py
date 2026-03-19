@@ -5,12 +5,10 @@ from datetime import datetime
 
 import litellm
 
-from src.agent.system_prompt import build_static_prompt
-
 logger = logging.getLogger(__name__)
 from src.config import AgentConfig
 from src.llm import call_llm
-from src.skills import parse_frontmatter
+from src.skills import build_skill_manifest, parse_frontmatter
 from src.tools.dispatcher import execute_tool_call
 from src.tools.schemas import get_tool_schemas
 
@@ -127,9 +125,25 @@ class Agent:
     def __init__(self, config: AgentConfig, tools: list[str] | None = None):
         self.config = config
         self.sessions: dict[str, list[dict]] = {}
-        self.static_prompt = build_static_prompt(config)
+        if not config.identity_file.exists():
+            raise FileNotFoundError(
+                f"Identity file not found: {config.identity_file}. "
+                "Curunir requires an identity file to start."
+            )
+        self._identity: str = config.identity_file.read_text()
+        self._skill_manifest: str = build_skill_manifest(config.skills_dir)
         self.tools = tools  # None = all tools
         self._session_tools: dict[str, set[str]] = {}  # extra tools loaded by skills
+
+    def _refresh_manifest(self) -> None:
+        self._skill_manifest = build_skill_manifest(self.config.skills_dir)
+
+    def _build_system_prompt(self) -> str:
+        parts = [self._identity]
+        if self._skill_manifest:
+            parts.append(self._skill_manifest)
+        parts.append(f"Current time: {datetime.now().isoformat()}")
+        return "\n\n".join(parts)
 
     def _get_tool_schemas(self, session_id: str | None = None) -> list[dict]:
         base = get_tool_schemas(self.tools)
@@ -153,19 +167,17 @@ class Agent:
             attachments: Optional list that will be populated with any files
                          the agent attaches during this request via the attach tool.
         """
+        if session_id not in self.sessions:
+            self._refresh_manifest()
         history = self.sessions.setdefault(session_id, [])
 
         if system_task_prompt:
             # System-initiated task: inject task as a user message so all LLM
             # providers accept the request (some reject system-only conversations).
-            system_prompt = (
-                self.static_prompt
-                + f"\n\nCurrent time: {datetime.now().isoformat()}"
-            )
             history.append({"role": "user", "content": f"## Scheduled Task\n{system_task_prompt}"})
         else:
             history.append({"role": "user", "content": message})
-            system_prompt = self.static_prompt + f"\n\nCurrent time: {datetime.now().isoformat()}"
+        system_prompt = self._build_system_prompt()
         _trim_history(history)
         messages = [{"role": "system", "content": system_prompt}] + history
 
